@@ -464,6 +464,8 @@ class Worker {
     u64                           referenceCutoffs = 0;
     u64                           referenceExpandedNodes = 0;
     u64                           referenceLegalMoves = 0;
+    u64                           referenceTTHits = 0;
+    Key                           lossTTKeySalt = 0;
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

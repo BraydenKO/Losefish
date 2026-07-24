@@ -80,9 +80,10 @@ specific rather than merely reporting that an aggregate changed.
 - `depth reached` is the requested and completed reference depth and is checked
   per fixture.
 
-Values, optimal move sets, node counts, cutoffs, PVs, and tree counters must be
-identical across timing samples. Only elapsed time is reduced to a per-position
-median.
+Values, optimal move sets, oracle node counts, and PVs must be identical across
+timing samples. Search counters and elapsed time use per-position medians because
+TT replacement collisions can produce small counter differences without changing
+the result.
 
 Wall-clock and NPS measurements remain sensitive to CPU scheduling and power
 state. Node reduction is therefore the primary performance signal for pruning

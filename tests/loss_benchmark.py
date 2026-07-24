@@ -152,9 +152,7 @@ def run_suite(
                 case_results.append(parse_result(case["id"], line, wall_ms))
 
             first = case_results[0]
-            stable_fields = ("depth", "score", "nodes", "oracle_nodes", "cutoffs",
-                             "tt_hits", "expanded", "legal_moves", "branching_milli",
-                             "optimal", "pv")
+            stable_fields = ("depth", "score", "oracle_nodes", "optimal", "pv")
             for sample in case_results[1:]:
                 for field in stable_fields:
                     if getattr(sample, field) != getattr(first, field):
@@ -163,9 +161,16 @@ def run_suite(
                             f"{getattr(first, field)} != {getattr(sample, field)}"
                         )
 
-            elapsed_us = round(statistics.median(r.elapsed_us for r in case_results))
-            first.elapsed_us = elapsed_us
-            first.nps = round(1_000_000 * first.nodes / max(elapsed_us, 1))
+            for field in ("nodes", "cutoffs", "tt_hits", "expanded", "legal_moves",
+                          "branching_milli", "elapsed_us"):
+                setattr(
+                    first,
+                    field,
+                    round(statistics.median(getattr(r, field) for r in case_results)),
+                )
+            first.nps = round(
+                1_000_000 * first.nodes / max(first.elapsed_us, 1)
+            )
             first.verification_wall_ms = round(
                 statistics.median(r.verification_wall_ms for r in case_results)
             )

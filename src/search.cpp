@@ -67,6 +67,9 @@ using namespace Search;
 
 namespace {
 
+constexpr Key LossTTObjectiveKey = 0xA8F1D3C79B624E05ULL;
+std::atomic<u64> lossVerificationNonce{0};
+
 constexpr u64 NODES_LIMIT_OUTPUT = 10'000'000;
 
 constexpr int SEARCHEDLIST_CAPACITY = 32;
@@ -359,40 +362,79 @@ Value Search::Worker::reference_negamax(Position&                    pos,
     if (depth <= 0 || ply >= MAX_PLY - 1)
         return objective.leaf(reference_material_eval(pos));
 
+    const Value oldAlpha = alpha;
+    const Key   ttKey    = pos.key() ^ lossTTKeySalt;
+    auto [ttHit, ttData, ttWriter] = tt.probe(ttKey);
+    Move ttMove = ttHit && moves.contains(ttData.move) ? ttData.move : Move::none();
+
+    if (ttHit)
+    {
+        ++referenceTTHits;
+        ttData.value = value_from_tt(ttData.value, ply, pos.rule50_count());
+
+        // A zero rule-50 clock means the immediately preceding move was
+        // irreversible, so earlier repetition history cannot affect this node.
+        // Other entries remain useful only for move ordering.
+        if (pos.rule50_count() == 0 && ttData.depth >= depth && is_valid(ttData.value)
+            && (ttData.bound == BOUND_EXACT
+                || (ttData.bound == BOUND_LOWER && ttData.value >= beta)
+                || (ttData.bound == BOUND_UPPER && ttData.value <= alpha)))
+        {
+            if (ttMove)
+                pv.push_back(ttMove);
+            return ttData.value;
+        }
+    }
+
     ++referenceExpandedNodes;
     referenceLegalMoves += moves.size();
 
     Value best = -VALUE_INFINITE;
+    Move  bestMove = Move::none();
 
-    for (Move move : moves)
+    for (int pass = 0; pass < 2; ++pass)
     {
-        StateInfo st;
-        PVMoves   childPv;
-
-        do_move(pos, move, st, nullptr);
-        Value value = -reference_negamax(pos, depth - 1, -beta, -alpha, ply + 1, childPv, objective);
-        undo_move(pos, move);
-
-        if (threads.stop.load(std::memory_order_relaxed))
-            return VALUE_ZERO;
-
-        if (value > best)
+        for (Move move : moves)
         {
-            best = value;
-            pv.clear();
-            pv.push_back(move);
-            for (Move childMove : childPv)
-                pv.push_back(childMove);
+            if ((move == ttMove) != (pass == 0))
+                continue;
+
+            StateInfo st;
+            PVMoves   childPv;
+
+            do_move(pos, move, st, nullptr);
+            Value value =
+              -reference_negamax(pos, depth - 1, -beta, -alpha, ply + 1, childPv, objective);
+            undo_move(pos, move);
+
+            if (threads.stop.load(std::memory_order_relaxed))
+                return VALUE_ZERO;
+
+            if (value > best)
+            {
+                best = value;
+                bestMove = move;
+                pv.clear();
+                pv.push_back(move);
+                for (Move childMove : childPv)
+                    pv.push_back(childMove);
+            }
+
+            alpha = std::max(alpha, value);
+            if (alpha >= beta)
+            {
+                ++referenceCutoffs;
+                break;
+            }
         }
 
-        alpha = std::max(alpha, value);
         if (alpha >= beta)
-        {
-            ++referenceCutoffs;
             break;
-        }
     }
 
+    Bound bound = best >= beta ? BOUND_LOWER : best <= oldAlpha ? BOUND_UPPER : BOUND_EXACT;
+    ttWriter.write(ttKey, value_to_tt(best, ply), false, bound, depth, bestMove, VALUE_NONE,
+                   tt.generation());
     return best;
 }
 
@@ -434,6 +476,7 @@ Value Search::Worker::brute_force_loss_minimax(
 
 void Search::Worker::loss_iterative_deepening() {
     const Depth maximumDepth = limits.depth ? limits.depth : MAX_PLY - 1;
+    lossTTKeySalt = LossTTObjectiveKey;
 
     RootMoves completed = rootMoves;
     for (Depth depth = 1; depth <= maximumDepth && !threads.stop; ++depth)
@@ -485,11 +528,14 @@ LossSearchVerification Search::Worker::verify_loss_search(Position& source,
     nodes = 0;
     threads.stop = false;
     referenceValidation = true;
-    referenceCutoffs = referenceExpandedNodes = referenceLegalMoves = 0;
+    referenceCutoffs = referenceExpandedNodes = referenceLegalMoves = referenceTTHits = 0;
     LossSearchVerification result;
     const auto start = std::chrono::steady_clock::now();
     for (usize run = 0; run < timingRuns; ++run)
     {
+        lossTTKeySalt =
+          LossTTObjectiveKey
+          ^ (++lossVerificationNonce * 0x9E3779B97F4A7C15ULL);
         PVMoves runPv;
         Value   score = reference_negamax(source, depth, -VALUE_INFINITE, VALUE_INFINITE, 0,
                                         runPv, LOSE_OBJECTIVE);
@@ -509,7 +555,7 @@ LossSearchVerification Search::Worker::verify_loss_search(Position& source,
     result.cutoffs = referenceCutoffs;
     result.expandedNodes = referenceExpandedNodes;
     result.legalMoves = referenceLegalMoves;
-    result.ttHits = 0;
+    result.ttHits = referenceTTHits;
     if (depth > 0)
     {
         MoveList<LEGAL> legalRootMoves(source);
