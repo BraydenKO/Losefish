@@ -1,0 +1,74 @@
+[
+  {
+    "id": "startpos",
+    "command": "position startpos",
+    "depth": 3,
+    "tags": ["broad", "quiet"]
+  },
+  {
+    "id": "pauly-selfmate",
+    "command": "position fen KB3N2/P1P1p1P1/5P1k/4P2p/7P/8/6B1/7b w - - 0 1",
+    "depth": 4,
+    "tags": ["forced-mate", "underpromotion", "recursive"]
+  },
+  {
+    "id": "mate-or-stalemate",
+    "command": "position fen 7k/8/4Q1K1/8/8/8/8/8 w - - 0 1",
+    "depth": 3,
+    "tags": ["stalemate", "terminal"]
+  },
+  {
+    "id": "only-legal-move",
+    "command": "position fen 7k/8/6K1/8/8/8/8/7R b - - 0 1",
+    "depth": 5,
+    "tags": ["check", "forced-move"]
+  },
+  {
+    "id": "zugzwang-pawn",
+    "command": "position fen 8/8/8/3k4/3P4/3K4/8/8 b - - 0 1",
+    "depth": 5,
+    "tags": ["zugzwang", "quiet"]
+  },
+  {
+    "id": "promotion-choice",
+    "command": "position fen 7k/P7/6K1/8/8/8/8/8 w - - 0 1",
+    "depth": 4,
+    "tags": ["promotion"]
+  },
+  {
+    "id": "repetition-history",
+    "command": "position startpos moves g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1",
+    "depth": 3,
+    "tags": ["repetition", "history"]
+  },
+  {
+    "id": "sparse-pawn",
+    "command": "position fen 8/8/3k4/8/3P4/4K3/8/8 w - - 0 1",
+    "depth": 5,
+    "tags": ["quiet", "pawn"]
+  },
+  {
+    "id": "sparse-tactical",
+    "command": "position fen 8/8/3k4/8/2n5/5K2/4R3/8 w - - 0 1",
+    "depth": 4,
+    "tags": ["capture", "check"]
+  },
+  {
+    "id": "balanced-pawns",
+    "command": "position fen 8/5k2/8/3p4/4P3/8/5K2/8 w - - 0 1",
+    "depth": 5,
+    "tags": ["pawn", "quiet"]
+  },
+  {
+    "id": "perpetual-seed",
+    "command": "position fen 5rk1/5p1p/3Nn1p1/3pP1P1/3q4/3R1Q2/PP6/1K6 b - - 1 40",
+    "depth": 3,
+    "tags": ["checks", "perpetual"]
+  },
+  {
+    "id": "root-checkmate",
+    "command": "position fen 7k/6Q1/6K1/8/8/8/8/8 b - - 0 1",
+    "depth": 4,
+    "tags": ["terminal", "checkmate"]
+  }
+]

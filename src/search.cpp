@@ -359,6 +359,9 @@ Value Search::Worker::reference_negamax(Position&                    pos,
     if (depth <= 0 || ply >= MAX_PLY - 1)
         return objective.leaf(reference_material_eval(pos));
 
+    ++referenceExpandedNodes;
+    referenceLegalMoves += moves.size();
+
     Value best = -VALUE_INFINITE;
 
     for (Move move : moves)
@@ -384,7 +387,10 @@ Value Search::Worker::reference_negamax(Position&                    pos,
 
         alpha = std::max(alpha, value);
         if (alpha >= beta)
+        {
+            ++referenceCutoffs;
             break;
+        }
     }
 
     return best;
@@ -472,21 +478,38 @@ void Search::Worker::loss_iterative_deepening() {
     rootMoves = std::move(completed);
 }
 
-LossSearchVerification Search::Worker::verify_loss_search(Position& source, Depth depth) {
+LossSearchVerification Search::Worker::verify_loss_search(Position& source,
+                                                           Depth     depth,
+                                                           usize     timingRuns) {
     accumulatorStack.reset();
     nodes = 0;
     threads.stop = false;
     referenceValidation = true;
-    PVMoves ignoredPv;
-
+    referenceCutoffs = referenceExpandedNodes = referenceLegalMoves = 0;
     LossSearchVerification result;
-    result.alphaBeta =
-      reference_negamax(source, depth, -VALUE_INFINITE, VALUE_INFINITE, 0, ignoredPv,
-                        LOSE_OBJECTIVE);
+    const auto start = std::chrono::steady_clock::now();
+    for (usize run = 0; run < timingRuns; ++run)
+    {
+        PVMoves runPv;
+        Value   score = reference_negamax(source, depth, -VALUE_INFINITE, VALUE_INFINITE, 0,
+                                        runPv, LOSE_OBJECTIVE);
+        assert(run == 0 || score == result.alphaBeta);
+        if (run == 0)
+        {
+            result.alphaBeta = score;
+            for (Move move : runPv)
+                result.pv.push_back(move);
+        }
+    }
+    result.elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
     result.alphaBetaNodes = nodes;
-    for (Move move : ignoredPv)
-        result.pv.push_back(move);
-
+    result.completedDepth = depth;
+    result.cutoffs = referenceCutoffs;
+    result.expandedNodes = referenceExpandedNodes;
+    result.legalMoves = referenceLegalMoves;
+    result.ttHits = 0;
     if (depth > 0)
     {
         MoveList<LEGAL> legalRootMoves(source);

@@ -60,7 +60,7 @@ def analyze(executable: str, commands: list[str], depth: int = 3) -> tuple[int, 
         ["uci", *commands, f"losscheck {depth} 1 1"],
     )
     match = re.search(
-        r"losscheck passed 1/1 depth \d+ score (-?\d+).*? pv(.*)", output
+        r"losscheck passed 1/1 depth \d+ .*?score (-?\d+).*? pv(.*)", output
     )
     if not match:
         raise AssertionError(f"losscheck did not pass\n{output}")

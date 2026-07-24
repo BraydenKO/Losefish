@@ -160,8 +160,9 @@ void UCIEngine::loop() {
             Depth depth = 3;
             usize positions = 16;
             u64   seed = 1;
-            is >> depth >> positions >> seed;
-            print_info_string(engine.loss_search_check(depth, positions, seed));
+            usize timingRuns = 1;
+            is >> depth >> positions >> seed >> timingRuns;
+            print_info_string(engine.loss_search_check(depth, positions, seed, timingRuns));
         }
         else if (token == "compiler")
             sync_cout << compiler_info() << sync_endl;

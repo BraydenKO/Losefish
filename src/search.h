@@ -84,6 +84,12 @@ struct LossSearchVerification {
     std::vector<Move> pv;
     std::vector<Move> alphaBetaOptimalMoves;
     std::vector<Move> oracleOptimalMoves;
+    Depth completedDepth = 0;
+    u64 elapsedUs = 0;
+    u64 cutoffs = 0;
+    u64 expandedNodes = 0;
+    u64 legalMoves = 0;
+    u64 ttHits = 0;
 
     bool passed() const {
         return alphaBeta == oracle && alphaBetaOptimalMoves == oracleOptimalMoves;
@@ -365,7 +371,7 @@ class Worker {
 
     // Milestone-2 correctness hook. This compares the alpha-beta reference
     // search with an independent exhaustive oracle on the supplied position.
-    LossSearchVerification verify_loss_search(Position&, Depth);
+    LossSearchVerification verify_loss_search(Position&, Depth, usize timingRuns = 1);
 
     // Public because they need to be updatable by the stats
     ButterflyHistory mainHistory;
@@ -455,6 +461,9 @@ class Worker {
     Eval::NNUE::AccumulatorStack  accumulatorStack;
     Eval::NNUE::AccumulatorCaches refreshTable;
     bool                          referenceValidation = false;
+    u64                           referenceCutoffs = 0;
+    u64                           referenceExpandedNodes = 0;
+    u64                           referenceLegalMoves = 0;
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

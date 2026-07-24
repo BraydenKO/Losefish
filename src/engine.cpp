@@ -165,9 +165,10 @@ void Engine::go(Search::LimitsType& limits) {
 }
 void Engine::stop() { threads.stop = true; }
 
-std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed) {
+std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed, usize timingRuns) {
     wait_for_search_finished();
     verify_network();
+    timingRuns = std::max<usize>(timingRuns, 1);
 
     PRNG rng(seed ? seed : 1);
 
@@ -179,8 +180,14 @@ std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed) {
     usize passed = 0;
     u64   alphaBetaNodes = 0;
     u64   oracleNodes    = 0;
+    u64   cutoffs        = 0;
+    u64   expandedNodes  = 0;
+    u64   legalMoves     = 0;
+    u64   ttHits         = 0;
+    u64   elapsedUs      = 0;
     Value lastScore      = VALUE_NONE;
     std::vector<Move> lastPv;
+    std::vector<Move> lastOptimalMoves;
 
     for (usize index = 0; index < positions; ++index)
     {
@@ -203,14 +210,21 @@ std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed) {
         threads.run_on_thread(0, [&]() {
             Position& verificationPosition = positions == 1 ? pos : testPosition;
             verification =
-              threads.main_thread()->worker->verify_loss_search(verificationPosition, depth);
+              threads.main_thread()->worker->verify_loss_search(verificationPosition, depth,
+                                                                timingRuns);
         });
         threads.wait_on_thread(0);
 
         alphaBetaNodes += verification.alphaBetaNodes;
         oracleNodes += verification.oracleNodes;
+        cutoffs += verification.cutoffs;
+        expandedNodes += verification.expandedNodes;
+        legalMoves += verification.legalMoves;
+        ttHits += verification.ttHits;
+        elapsedUs += verification.elapsedUs;
         lastScore = verification.alphaBeta;
         lastPv = verification.pv;
+        lastOptimalMoves = verification.alphaBetaOptimalMoves;
 
         if (!verification.passed())
         {
@@ -230,8 +244,16 @@ std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed) {
 
     std::ostringstream out;
     out << "losscheck passed " << passed << '/' << positions << " depth " << depth
+        << " timing-runs " << timingRuns
         << " score " << lastScore << " alpha-beta-nodes " << alphaBetaNodes << " oracle-nodes "
-        << oracleNodes << " pv";
+        << oracleNodes << " elapsed-us " << elapsedUs << " nps "
+        << (1000000 * alphaBetaNodes / std::max<u64>(elapsedUs, 1)) << " cutoffs " << cutoffs
+        << " tt-hits " << ttHits << " expanded " << expandedNodes << " legal-moves " << legalMoves
+        << " branching-milli " << (1000 * legalMoves / std::max<u64>(expandedNodes, 1))
+        << " optimal";
+    for (Move move : lastOptimalMoves)
+        out << ' ' << UCIEngine::move(move, testPosition.is_chess960());
+    out << " pv";
     for (Move move : lastPv)
         out << ' ' << UCIEngine::move(move, testPosition.is_chess960());
     return out.str();
