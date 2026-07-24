@@ -313,7 +313,12 @@ void ThreadPool::start_thinking(const OptionsMap&  options,
         for (const auto& m : legalmoves)
             rootMoves.emplace_back(m);
 
-    Tablebases::Config tbConfig = Tablebases::rank_root_moves(options, pos, rootMoves);
+    // Normal root tablebase ranks have the opposite preference from the loss
+    // objective. Syzygy support is intentionally deferred until its semantics
+    // are objective-aware.
+    Tablebases::Config tbConfig;
+    if (!options["IntentionalLoss"])
+        tbConfig = Tablebases::rank_root_moves(options, pos, rootMoves);
 
     // After ownership transfer 'states' becomes empty, so if we stop the search
     // and call 'go' again without setting a new position states.get() == nullptr.

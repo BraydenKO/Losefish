@@ -155,6 +155,14 @@ void UCIEngine::loop() {
             sync_cout << engine.visualize() << sync_endl;
         else if (token == "eval")
             engine.trace_eval();
+        else if (token == "losscheck")
+        {
+            Depth depth = 3;
+            usize positions = 16;
+            u64   seed = 1;
+            is >> depth >> positions >> seed;
+            print_info_string(engine.loss_search_check(depth, positions, seed));
+        }
         else if (token == "compiler")
             sync_cout << compiler_info() << sync_endl;
         else if (token == "export_net")

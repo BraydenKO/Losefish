@@ -57,6 +57,39 @@ class OptionsMap;
 
 namespace Search {
 
+// SearchObjective describes what a search value means. Search mechanics should
+// depend on an objective policy instead of embedding value semantics directly,
+// so future experimental objectives can reuse the reference search.
+enum class SearchObjective {
+    Normal,
+    Lose
+};
+
+// Value semantics are supplied independently from the tree-search mechanics.
+// The reference search only asks how to score leaves, draws, and checkmate.
+struct SearchObjectivePolicy {
+    virtual ~SearchObjectivePolicy() = default;
+
+    virtual SearchObjective objective() const = 0;
+    virtual Value leaf(Value conventionalSideToMoveEval) const = 0;
+    virtual Value draw() const                                  = 0;
+    virtual Value checkmated(int ply) const                     = 0;
+};
+
+struct LossSearchVerification {
+    Value alphaBeta = VALUE_NONE;
+    Value oracle    = VALUE_NONE;
+    u64   alphaBetaNodes = 0;
+    u64   oracleNodes    = 0;
+    std::vector<Move> pv;
+    std::vector<Move> alphaBetaOptimalMoves;
+    std::vector<Move> oracleOptimalMoves;
+
+    bool passed() const {
+        return alphaBeta == oracle && alphaBetaOptimalMoves == oracleOptimalMoves;
+    }
+};
+
 struct PVMoves {
     Move  moves[MAX_PLY + 1];
     usize length = 0;
@@ -330,6 +363,10 @@ class Worker {
 
     void ensure_network_replicated();
 
+    // Milestone-2 correctness hook. This compares the alpha-beta reference
+    // search with an independent exhaustive oracle on the supplied position.
+    LossSearchVerification verify_loss_search(Position&, Depth);
+
     // Public because they need to be updatable by the stats
     ButterflyHistory mainHistory;
     LowPlyHistory    lowPlyHistory;
@@ -343,6 +380,16 @@ class Worker {
 
    private:
     bool iterative_deepening();
+    void loss_iterative_deepening();
+
+    Value reference_negamax(Position&,
+                            Depth,
+                            Value,
+                            Value,
+                            int,
+                            PVMoves&,
+                            const SearchObjectivePolicy&);
+    Value brute_force_loss_minimax(Position&, Depth, int, Color, u64&);
 
     void do_move(Position& pos, const Move move, StateInfo& st, Stack* const ss);
     void
@@ -407,6 +454,7 @@ class Worker {
     // Used by NNUE
     Eval::NNUE::AccumulatorStack  accumulatorStack;
     Eval::NNUE::AccumulatorCaches refreshTable;
+    bool                          referenceValidation = false;
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

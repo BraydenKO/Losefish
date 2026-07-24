@@ -72,6 +72,57 @@ constexpr u64 NODES_LIMIT_OUTPUT = 10'000'000;
 constexpr int SEARCHEDLIST_CAPACITY = 32;
 using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
 
+class LoseObjectivePolicy final: public SearchObjectivePolicy {
+   public:
+    SearchObjective objective() const override { return SearchObjective::Lose; }
+
+    Value leaf(Value conventionalSideToMoveEval) const override {
+        // Keep heuristic leaves outside the decisive score range. The negation
+        // is only a horizon estimate; recursive move choice is performed by
+        // the reference negamax itself.
+        return std::clamp(-conventionalSideToMoveEval, VALUE_TB_LOSS_IN_MAX_PLY + 1,
+                          VALUE_TB_WIN_IN_MAX_PLY - 1);
+    }
+
+    Value draw() const override { return VALUE_DRAW; }
+
+    Value checkmated(int ply) const override {
+        // Under the loss objective, being checkmated is the best outcome.
+        // Earlier self-mate is preferred.
+        return mate_in(ply);
+    }
+};
+
+const LoseObjectivePolicy LOSE_OBJECTIVE;
+
+// Correctness-first leaf evaluation for the reference search. It deliberately
+// uses only material, is valid in and out of check, and has no dependency on
+// NNUE accumulator state, optimism, histories, or the transposition table.
+Value reference_material_eval(const Position& pos) {
+    const Color us   = pos.side_to_move();
+    const Color them = ~us;
+
+    Value usMaterial   = pos.non_pawn_material(us) + PawnValue * pos.count<PAWN>(us);
+    Value themMaterial = pos.non_pawn_material(them) + PawnValue * pos.count<PAWN>(them);
+
+    return std::clamp(usMaterial - themMaterial, VALUE_TB_LOSS_IN_MAX_PLY + 1,
+                      VALUE_TB_WIN_IN_MAX_PLY - 1);
+}
+
+// The oracle intentionally spells out the same evaluator contract instead of
+// calling the reference adapter, so perspective/sign mistakes remain visible.
+Value oracle_side_to_move_loss_leaf(const Position& pos) {
+    const Color us   = pos.side_to_move();
+    const Color them = ~us;
+
+    const Value conventional =
+      (pos.non_pawn_material(us) + PawnValue * pos.count<PAWN>(us))
+      - (pos.non_pawn_material(them) + PawnValue * pos.count<PAWN>(them));
+
+    return std::clamp(-conventional, VALUE_TB_LOSS_IN_MAX_PLY + 1,
+                      VALUE_TB_WIN_IN_MAX_PLY - 1);
+}
+
 // (*Scalers):
 // The values with Scaler asterisks have proven non-linear scaling.
 // They are optimized to time controls of 180 + 1.8 and longer,
@@ -205,9 +256,29 @@ void Search::Worker::start_searching() {
 
     if (rootMoves.empty())
     {
+        Value terminalValue =
+          options["IntentionalLoss"] && rootPos.checkers() ? VALUE_MATE
+                                                          : rootPos.checkers() ? -VALUE_MATE
+                                                                               : VALUE_DRAW;
         main_manager()->updates.onUpdateNoMoves(
-          {0, {rootPos.checkers() ? -VALUE_MATE : VALUE_DRAW, rootPos}});
+          {0, {terminalValue, rootPos}});
         main_manager()->updates.onBestmove(UCIEngine::move(Move::none()), "");
+        return;
+    }
+
+    if (options["IntentionalLoss"])
+    {
+        // Milestones 1-2 are intentionally single-threaded. No helper thread,
+        // tablebase probe, TT lookup, or normal pruning participates.
+        main_manager()->callsCnt = 0;
+        loss_iterative_deepening();
+
+        std::string ponder;
+        if (rootMoves[0].pv.size() > 1)
+            ponder = UCIEngine::move(rootMoves[0].pv[1], rootPos.is_chess960());
+
+        main_manager()->updates.onBestmove(
+          UCIEngine::move(rootMoves[0].pv[0], rootPos.is_chess960()), ponder);
         return;
     }
 
@@ -261,6 +332,207 @@ void Search::Worker::start_searching() {
 
     auto bestmove = UCIEngine::move(bestThread->rootMoves[0].pv[0], rootPos.is_chess960());
     main_manager()->updates.onBestmove(bestmove, ponder);
+}
+
+Value Search::Worker::reference_negamax(Position&                    pos,
+                                        Depth                        depth,
+                                        Value                        alpha,
+                                        Value                        beta,
+                                        int                          ply,
+                                        PVMoves&                     pv,
+                                        const SearchObjectivePolicy& objective) {
+    pv.clear();
+
+    if (threads.stop.load(std::memory_order_relaxed))
+        return VALUE_ZERO;
+
+    if (is_mainthread() && !referenceValidation)
+        main_manager()->check_time(*this);
+
+    if (ply && pos.is_draw(ply))
+        return objective.draw();
+
+    MoveList<LEGAL> moves(pos);
+    if (moves.size() == 0)
+        return pos.checkers() ? objective.checkmated(ply) : objective.draw();
+
+    if (depth <= 0 || ply >= MAX_PLY - 1)
+        return objective.leaf(reference_material_eval(pos));
+
+    Value best = -VALUE_INFINITE;
+
+    for (Move move : moves)
+    {
+        StateInfo st;
+        PVMoves   childPv;
+
+        do_move(pos, move, st, nullptr);
+        Value value = -reference_negamax(pos, depth - 1, -beta, -alpha, ply + 1, childPv, objective);
+        undo_move(pos, move);
+
+        if (threads.stop.load(std::memory_order_relaxed))
+            return VALUE_ZERO;
+
+        if (value > best)
+        {
+            best = value;
+            pv.clear();
+            pv.push_back(move);
+            for (Move childMove : childPv)
+                pv.push_back(childMove);
+        }
+
+        alpha = std::max(alpha, value);
+        if (alpha >= beta)
+            break;
+    }
+
+    return best;
+}
+
+Value Search::Worker::brute_force_loss_minimax(
+  Position& pos, Depth depth, int ply, Color rootSide, u64& nodeCount) {
+    ++nodeCount;
+
+    if (ply && pos.is_draw(ply))
+        return VALUE_DRAW;
+
+    MoveList<LEGAL> moves(pos);
+    if (moves.size() == 0)
+    {
+        if (!pos.checkers())
+            return VALUE_DRAW;
+
+        Value sideToMoveLoss = mate_in(ply);
+        return pos.side_to_move() == rootSide ? sideToMoveLoss : -sideToMoveLoss;
+    }
+
+    if (depth <= 0 || ply >= MAX_PLY - 1)
+    {
+        Value sideToMoveLoss = oracle_side_to_move_loss_leaf(pos);
+        return pos.side_to_move() == rootSide ? sideToMoveLoss : -sideToMoveLoss;
+    }
+
+    const bool maximize = pos.side_to_move() == rootSide;
+    Value      best     = maximize ? -VALUE_INFINITE : VALUE_INFINITE;
+    for (Move move : moves)
+    {
+        StateInfo st;
+        do_move(pos, move, st, nullptr);
+        Value value = brute_force_loss_minimax(pos, depth - 1, ply + 1, rootSide, nodeCount);
+        undo_move(pos, move);
+        best = maximize ? std::max(best, value) : std::min(best, value);
+    }
+    return best;
+}
+
+void Search::Worker::loss_iterative_deepening() {
+    const Depth maximumDepth = limits.depth ? limits.depth : MAX_PLY - 1;
+
+    RootMoves completed = rootMoves;
+    for (Depth depth = 1; depth <= maximumDepth && !threads.stop; ++depth)
+    {
+        RootMoves iteration = rootMoves;
+        Value     alpha     = -VALUE_INFINITE;
+
+        for (RootMove& rm : iteration)
+        {
+            StateInfo st;
+            PVMoves   childPv;
+            Move      move = rm.pv[0];
+
+            do_move(rootPos, move, st, nullptr);
+            Value value =
+              -reference_negamax(rootPos, depth - 1, -VALUE_INFINITE, -alpha, 1, childPv,
+                                 LOSE_OBJECTIVE);
+            undo_move(rootPos, move);
+
+            if (threads.stop)
+                break;
+
+            rm.score = rm.uciScore = value;
+            rm.pv.resize(1);
+            for (Move childMove : childPv)
+                rm.pv.push_back(childMove);
+
+            alpha = std::max(alpha, value);
+        }
+
+        if (threads.stop)
+            break;
+
+        std::stable_sort(iteration.begin(), iteration.end());
+        completed = std::move(iteration);
+        rootDepth = depth;
+
+        if (limits.depth && depth >= limits.depth)
+            break;
+    }
+
+    rootMoves = std::move(completed);
+}
+
+LossSearchVerification Search::Worker::verify_loss_search(Position& source, Depth depth) {
+    accumulatorStack.reset();
+    nodes = 0;
+    threads.stop = false;
+    referenceValidation = true;
+    PVMoves ignoredPv;
+
+    LossSearchVerification result;
+    result.alphaBeta =
+      reference_negamax(source, depth, -VALUE_INFINITE, VALUE_INFINITE, 0, ignoredPv,
+                        LOSE_OBJECTIVE);
+    result.alphaBetaNodes = nodes;
+    for (Move move : ignoredPv)
+        result.pv.push_back(move);
+
+    if (depth > 0)
+    {
+        MoveList<LEGAL> legalRootMoves(source);
+        for (Move move : legalRootMoves)
+        {
+            StateInfo st;
+            PVMoves   childPv;
+            do_move(source, move, st, nullptr);
+            Value value =
+              -reference_negamax(source, depth - 1, -VALUE_INFINITE, VALUE_INFINITE, 1, childPv,
+                                 LOSE_OBJECTIVE);
+            undo_move(source, move);
+
+            if (value == result.alphaBeta)
+                result.alphaBetaOptimalMoves.push_back(move);
+        }
+    }
+
+    accumulatorStack.reset();
+    nodes = 0;
+    result.oracle = brute_force_loss_minimax(source, depth, 0, source.side_to_move(),
+                                             result.oracleNodes);
+
+    if (depth > 0)
+    {
+        const Color     rootSide = source.side_to_move();
+        MoveList<LEGAL> legalRootMoves(source);
+        for (Move move : legalRootMoves)
+        {
+            StateInfo st;
+            do_move(source, move, st, nullptr);
+            Value value =
+              brute_force_loss_minimax(source, depth - 1, 1, rootSide, result.oracleNodes);
+            undo_move(source, move);
+
+            if (value == result.oracle)
+                result.oracleOptimalMoves.push_back(move);
+        }
+    }
+
+    auto byRawMove = [](Move a, Move b) { return a.raw() < b.raw(); };
+    std::sort(result.alphaBetaOptimalMoves.begin(), result.alphaBetaOptimalMoves.end(), byRawMove);
+    std::sort(result.oracleOptimalMoves.begin(), result.oracleOptimalMoves.end(), byRawMove);
+
+    referenceValidation = false;
+    return result;
 }
 
 // Main iterative deepening loop. It calls search()

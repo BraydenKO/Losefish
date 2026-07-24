@@ -111,6 +111,7 @@ class Engine {
     std::string                          numa_config_information_as_string() const;
     std::string                          thread_allocation_information_as_string() const;
     std::string                          thread_binding_information_as_string() const;
+    std::string loss_search_check(Depth depth, usize positions, u64 seed);
 
    private:
     const std::filesystem::path binaryDirectory;

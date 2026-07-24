@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "evaluate.h"
+#include "movegen.h"
 #include "misc.h"
 #include "nnue/network.h"
 #include "nnue/nnue_common.h"
@@ -121,6 +122,10 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
 
     options.add("UCI_ShowWDL", Option(false));
 
+    // Experimental correctness-first search. Milestones 1-2 deliberately run
+    // this objective on the main worker only and bypass Syzygy and SMP.
+    options.add("IntentionalLoss", Option(false));
+
     options.add(  //
       "SyzygyPath", Option("", [](const Option& o) {
           Tablebases::init(o);
@@ -159,6 +164,78 @@ void Engine::go(Search::LimitsType& limits) {
     threads.start_thinking(options, pos, states, limits);
 }
 void Engine::stop() { threads.stop = true; }
+
+std::string Engine::loss_search_check(Depth depth, usize positions, u64 seed) {
+    wait_for_search_finished();
+    verify_network();
+
+    PRNG rng(seed ? seed : 1);
+
+    StateInfo testState;
+    Position  testPosition;
+    testPosition.set(pos.fen(), pos.is_chess960(), &testState);
+    std::deque<StateInfo> history;
+
+    usize passed = 0;
+    u64   alphaBetaNodes = 0;
+    u64   oracleNodes    = 0;
+    Value lastScore      = VALUE_NONE;
+    std::vector<Move> lastPv;
+
+    for (usize index = 0; index < positions; ++index)
+    {
+        // Advance a deterministic random legal walk. Tests start this walk from
+        // sparse FENs so exhaustive depth remains small. Index zero deliberately
+        // checks the exact supplied position for fixture diagnostics.
+        const int plies = index ? 1 + int(rng.rand<unsigned>() % 4) : 0;
+        for (int ply = 0; ply < plies; ++ply)
+        {
+            MoveList<LEGAL> moves(testPosition);
+            if (moves.size() == 0)
+                break;
+
+            Move move = *(moves.begin() + rng.rand<usize>() % moves.size());
+            history.emplace_back();
+            testPosition.do_move(move, history.back());
+        }
+
+        Search::LossSearchVerification verification;
+        threads.run_on_thread(0, [&]() {
+            Position& verificationPosition = positions == 1 ? pos : testPosition;
+            verification =
+              threads.main_thread()->worker->verify_loss_search(verificationPosition, depth);
+        });
+        threads.wait_on_thread(0);
+
+        alphaBetaNodes += verification.alphaBetaNodes;
+        oracleNodes += verification.oracleNodes;
+        lastScore = verification.alphaBeta;
+        lastPv = verification.pv;
+
+        if (!verification.passed())
+        {
+            std::ostringstream out;
+            out << "losscheck failed index " << index << " depth " << depth << " alpha-beta "
+                << verification.alphaBeta << " oracle " << verification.oracle << " fen "
+                << testPosition.fen() << " alpha-beta-optimal";
+            for (Move move : verification.alphaBetaOptimalMoves)
+                out << ' ' << UCIEngine::move(move, testPosition.is_chess960());
+            out << " oracle-optimal";
+            for (Move move : verification.oracleOptimalMoves)
+                out << ' ' << UCIEngine::move(move, testPosition.is_chess960());
+            return out.str();
+        }
+        ++passed;
+    }
+
+    std::ostringstream out;
+    out << "losscheck passed " << passed << '/' << positions << " depth " << depth
+        << " score " << lastScore << " alpha-beta-nodes " << alphaBetaNodes << " oracle-nodes "
+        << oracleNodes << " pv";
+    for (Move move : lastPv)
+        out << ' ' << UCIEngine::move(move, testPosition.is_chess960());
+    return out.str();
+}
 
 void Engine::search_clear() {
     wait_for_search_finished();
